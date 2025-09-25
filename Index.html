@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enhanced Trading Bot with Email Notifications</title>
+<style>
+body { font-family: Arial; text-align: center; padding: 20px; background:#f4f4f9; }
+#status { font-weight:bold; margin:10px; }
+#timer { font-size:1.5em; margin:10px; color:#333; }
+#signal { margin:10px; font-size:1.3em; color:#222; }
+table { margin:auto; border-collapse: collapse; width: 90%; }
+th, td { border:1px solid #aaa; padding:5px; text-align:center; }
+tr.buy { background-color:#c6f5c6; }
+tr.sell { background-color:#f5c6c6; }
+tr.hold { background-color:#ddd; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/emailjs-com@3/dist/email.min.js"></script>
+<script>
+  (function(){
+    emailjs.init("HGaYRw8_AOw7mHVnT"); // Your Public Key
+  })();
+</script>
+</head>
+<body>
+
+<h1>Enhanced Multi-Pair Trading Bot</h1>
+<div id="status">Loading...</div>
+<div id="timer">Timer here</div>
+<div id="signal">Signals will appear here</div>
+
+<h3>Signal History (Last 10 per pair)</h3>
+<table id="history">
+  <thead>
+    <tr><th>Pair</th><th>Time</th><th>Signal</th><th>Confidence %</th><th>SL</th><th>TP</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+
+<script>
+const API_KEY = "8e5b62a138d242ed9088bc33f29299c1"; // TwelveData API Key
+const PAIRS = ["EUR/USD","GBP/USD"];
+const SIGNAL_HISTORY = {};
+PAIRS.forEach(p => SIGNAL_HISTORY[p] = []);
+const SIGNAL_INTERVAL = 60; // seconds
+const MIN_CONFIDENCE = 70; // minimum confidence to show BUY/SELL
+let timer = SIGNAL_INTERVAL;
+
+// ===== Helpers =====
+async function fetchData(symbol, interval){
+  try {
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=50&apikey=${API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if(!data.values) return [];
+    return data.values.map(v=>({
+      time:v.datetime,
+      open:parseFloat(v.open),
+      close:parseFloat(v.close),
+      high:parseFloat(v.high),
+      low:parseFloat(v.low),
+      volume: parseFloat(v.volume || 0)
+    }));
+  } catch(e){ return []; }
+}
+
+function movingAverage(candles, period=10){ return candles.slice(0,period).reduce((sum,c)=>sum+c.close,0)/period; }
+function ema(candles, period=12){ let k=2/(period+1), emaPrev=movingAverage(candles.slice(0,period), period); for(let i=period;i<candles.length;i++) emaPrev=candles[i].close*k + emaPrev*(1-k); return emaPrev; }
+function rsi(candles, period=14){ if(candles.length<period) return 50; let gains=0, losses=0; for(let i=1;i<=period;i++){ const diff=candles[i].close-candles[i-1].close; if(diff>0) gains+=diff; else losses-=diff;} return losses===0?100:100-100/(1+gains/losses); }
+function atr(candles, period=14){ if(candles.length<=period) return 0; let trSum=0; for(let i=1;i<=period;i++){ const h=candles[i].high,l=candles[i].low,cPrev=candles[i-1].close; trSum+=Math.max(h-l, Math.abs(h-cPrev), Math.abs(l-cPrev));} return trSum/period; }
+function macd(candles, fast=12, slow=26){ return ema(candles,fast)-ema(candles,slow); }
+function stochasticRSI(candles, period=14){ if(candles.length<period) return 50; const rsiValues=[]; for(let i=0;i<candles.length;i++){ const slice=candles.slice(Math.max(0,i-period+1), i+1); if(slice.length<period) continue; rsiValues.push(rsi(slice, period)); } const lastRSI=rsiValues[rsiValues.length-1], minRSI=Math.min(...rsiValues), maxRSI=Math.max(...rsiValues); return ((lastRSI-minRSI)/(maxRSI-minRSI))*100; }
+function isMarketActive(){ const h=new Date().getUTCHours(); return (h>=8&&h<17)||(h>=13&&h<22); }
+function detectBullishEngulfing(candles){ if(candles.length<2) return false; const [c0,c1]=candles; return c0.close>c0.open && c1.close<c1.open && c0.close>c1.open && c0.open<c1.close;}
+function detectBearishEngulfing(candles){ if(candles.length<2) return false; const [c0,c1]=candles; return c0.close<c0.open && c1.close>c1.open && c0.open>c1.close && c0.close<c1.open; }
+function getSupportResistance(candles, lookback=20){ const highs=candles.slice(0,lookback).map(c=>c.high), lows=candles.slice(0,lookback).map(c=>c.low); return {resistance:Math.max(...highs), support:Math.min(...lows)}; }
+function validateSignal(candles,direction){ const last3=candles.slice(0,3); if(direction==="BUY") return last3.every(c=>c.close>c.open); if(direction==="SELL") return last3.every(c=>c.close<c.open); return false; }
+
+// ===== Core Signal Logic with Confidence Threshold =====
+async function getSignal(pair){
+  let signal="HOLD", confidence=0, sl="-", tp="-";
+  let m1=[];
+
+  if(!isMarketActive()) return {signalText:`${pair}: HOLD – Market Inactive`, confidence, sl, tp};
+
+  try{
+    const [m1data,m5data,m15data,h1data,h4data]=await Promise.all([
+      fetchData(pair,"1min"), fetchData(pair,"5min"), fetchData(pair,"15min"),
+      fetchData(pair,"60min"), fetchData(pair,"240min")
+    ]);
+
+    if(!m1data.length) return {signalText:`${pair}: HOLD – No Data`, confidence, sl, tp};
+    m1 = m1data;
+
+    // Multi-Timeframe Trend
+    const ma1=movingAverage(m1data), ma5=movingAverage(m5data), ma15=movingAverage(m15data);
+    const ema1=ema(m1data), ema5=ema(m5data), ema15=ema(m15data);
+
+    let buyCount=0,sellCount=0;
+    if(m1data[0].close>ma1 && m5data[0].close>ma5 && m15data[0].close>ma15 && m1data[0].close>ema1 && m5data[0].close>ema5 && m15data[0].close>ema15) buyCount++;
+    if(m1data[0].close<ma1 && m5data[0].close<ma5 && m15data[0].close<ma15 && m1data[0].close<ema1 && m5data[0].close<ema5 && m15data[0].close<ema15) sellCount++;
+
+    // Volatility Filter
+    const vol=atr(m5data);
+    if(vol<0.0003) return {signalText:`${pair}: HOLD – Low Volatility`, confidence, sl, tp};
+
+    // Candlestick Pattern
+    if(detectBullishEngulfing(m1data.slice(0,2))) buyCount++;
+    if(detectBearishEngulfing(m1data.slice(0,2))) sellCount++;
+
+    // Support/Resistance
+    const {support,resistance}=getSupportResistance(m15data);
+    if(m1data[0].close>=resistance) buyCount=0;
+    if(m1data[0].close<=support) sellCount=0;
+
+    // Confidence Scoring
+    if(buyCount>=2 && validateSignal(m1data,"BUY")) confidence=buyCount/4*100;
+    else if(sellCount>=2 && validateSignal(m1data,"SELL")) confidence=sellCount/4*100;
+    else confidence=0;
+
+    // Apply Minimum Confidence
+    if(confidence < MIN_CONFIDENCE) signal="HOLD";
+    else if(buyCount>=2 && validateSignal(m1data,"BUY")) signal="BUY";
+    else if(sellCount>=2 && validateSignal(m1data,"SELL")) signal="SELL";
+
+    // SL / TP
+    if(signal==="BUY"){ sl=(m1data[0].close-vol).toFixed(5); tp=(m1data[0].close+vol*2*confidence/100).toFixed(5);}
+    if(signal==="SELL"){ sl=(m1data[0].close+vol).toFixed(5); tp=(m1data[0].close-vol*2*confidence/100).toFixed(5);}
+
+    // ===== Send Email Notification =====
+    if(signal==="BUY" || signal==="SELL"){
+      sendEmail(pair, signal, confidence, sl, tp);
+    }
+
+  }catch(e){ /* fallback HOLD */ }
+
+  const nowStr = new Date().toLocaleTimeString();
+  SIGNAL_HISTORY[pair].unshift({time:nowStr, signal, confidence, sl, tp});
+  if(SIGNAL_HISTORY[pair].length>10) SIGNAL_HISTORY[pair].pop();
+
+  return {signalText:`${pair}: ${signal} | Confidence: ${confidence.toFixed(0)}%`, confidence, sl, tp};
+}
+
+// ===== Send Email =====
+function sendEmail(pair, signal, confidence, sl, tp){
+  emailjs.send("service_k1unalq","template_3fcy8kv",{
+    pair: pair,
+    signal: signal,
+    confidence: confidence.toFixed(0),
+    stoploss: sl,
+    takeprofit: tp,
+    time: new Date().toLocaleString()
+  })
+  .then(res=>console.log("Email sent!", res))
+  .catch(err=>console.error("Email error:", err));
+}
+
+// ===== Update Table =====
+function updateHistoryTable(){
+  const tbody=document.querySelector("#history tbody");
+  tbody.innerHTML="";
+  PAIRS.forEach(pair=>{
+    SIGNAL_HISTORY[pair].forEach(item=>{
+      const row=document.createElement("tr");
+      row.className=item.signal.toLowerCase();
+      row.innerHTML=`<td>${pair}</td><td>${item.time}</td><td>${item.signal}</td><td>${item.confidence.toFixed(0)}</td><td>${item.sl}</td><td>${item.tp}</td>`;
+      tbody.appendChild(row);
+    });
+  });
+}
+
+// ===== Fetch All Signals & Display =====
+async function fetchAllSignals(){
+  const signalEl=document.getElementById("signal");
+  const latestSignals=[];
+  for(const pair of PAIRS){
+    const result=await getSignal(pair);
+    latestSignals.push(result.signalText);
+  }
+  signalEl.innerHTML = latestSignals.join("<br>");
+  updateHistoryTable();
+  document.getElementById("status").innerText="✅ Signals Updated";
+}
+
+// ===== Timer =====
+function startTimer(){
+  const timerEl = document.getElementById("timer");
+  setInterval(async ()=>{
+    const min=Math.floor(timer/60);
+    const sec=timer%60;
+    timerEl.innerText=`Next signal in: ${min}:${sec<10?"0":""}${sec}`;
+    if(timer<=0){
+      timer=SIGNAL_INTERVAL;
+      await fetchAllSignals();
+    }
+    timer--;
+  },1000);
+}
+
+// ===== Initialize =====
+fetchAllSignals();
+startTimer();
+</script>
+
+</body>
+</html>
