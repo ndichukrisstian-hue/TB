@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Enhanced Trading Bot with Email Notifications</title>
+<style>
+body { font-family: Arial; text-align: center; padding: 20px; background:#f4f4f9; }
+#status { font-weight:bold; margin:10px; }
+#timer { font-size:1.5em; margin:10px; color:#333; }
+#signal { margin:10px; font-size:1.3em; color:#222; }
+table { margin:auto; border-collapse: collapse; width: 90%; }
+th, td { border:1px solid #aaa; padding:5px; text-align:center; }
+tr.buy { background-color:#c6f5c6; }
+tr.sell { background-color:#f5c6c6; }
+tr.hold { background-color:#ddd; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/emailjs-com@3/dist/email.min.js"></script>
+<script>
+  (function(){
+    emailjs.init("HGaYRw8_AOw7mHVnT");
+  })();
+</script>
+</head>
+<body>
+<h1>Enhanced Multi-Pair Trading Bot</h1>
+<div id="status">Loading...</div>
+<div id="timer">Timer here</div>
+<div id="signal">Signals will appear here</div>
+<h3>Signal History (Last 10 per pair)</h3>
+<table id="history">
+  <thead>
+    <tr><th>Pair</th><th>Time</th><th>Signal</th><th>Confidence %</th><th>SL</th><th>TP</th></tr>
+  </thead>
+  <tbody></tbody>
+</table>
+<script>
+// Original bot code here (trimmed for brevity since user already has full code)
+</script>
+</body>
+</html>
